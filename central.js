@@ -1,7 +1,7 @@
 
 let client = null;
 let access = '';
-let data = { riders: [], orders: [] };
+let data = { riders: [], orders: [], zones: [] };
 let busy = false;
 let loggingIn = false;
 
@@ -9,7 +9,7 @@ const values = [
   'local', 'products', 'instructions', 'address',
   'reference', 'phone', 'map', 'notes', 'payment',
   'productAmount', 'deliveryAmount', 'etaMinutes',
-  'rider', 'assignment', 'reason', 'raw'
+  'rider', 'assignment', 'reason', 'raw', 'zoneId', 'realDeliveryAmount'
 ];
 
 function get(id) {
@@ -66,12 +66,18 @@ async function load() {
 function render() {
   const rs = data.riders || [];
   const os = data.orders || [];
+  const zones = data.zones || [];
+  const selectedZone=get('zone');
+  $('zone').innerHTML='<option value="">Sin zona definida</option>'+zones.filter(z=>z.active).map(z=>`<option value="${esc(z.id)}">${esc(z.name)}</option>`).join('');
+  if(zones.some(z=>z.id===selectedZone && z.active)) set('zone',selectedZone);
+  $('zones').innerHTML=zones.map(z=>`<div class="row item"><b>${esc(z.name)}</b><span>${z.active?'Activa':'Desactivada'}</span><button class="secondary" data-zone-edit="${z.id}">Editar</button><button class="secondary" data-zone-toggle="${z.id}">${z.active?'Desactivar':'Activar'}</button></div>`).join('')||'<p>Agrega una zona para comenzar.</p>';
+
 
   $('riders').innerHTML = rs.map((r, i) => `
     <div class="item">
       <b>${i + 1}. ${esc(r.name)}</b>
       · ${
-        r.active
+        r.retired ? '⛔ Inactivo' : r.active
           ? r.busy
             ? '🔴 Ocupado'
             : r.pending
@@ -80,10 +86,11 @@ function render() {
           : '⚪ Pausado'
       }
 
-      <button class="secondary" data-toggle="${r.id}">
-        ${r.active ? 'Pausar' : 'Activar'}
+      <button class="secondary" data-toggle="${r.id}" ${r.retired?'disabled':''}>
+        ${r.active ? 'Fuera de turno' : 'En turno'}
       </button>
 
+      <button class="secondary" data-retire="${r.id}">${r.retired?'Restaurar registro':'Retirar del listado'}</button>
       <button class="secondary" data-rider-link="${r.token}">
         Copiar enlace único
       </button>
@@ -92,8 +99,8 @@ function render() {
 
   const current = get('rider');
 
-  $('rider').innerHTML = rs
-    .filter(r => r.active)
+  $('rider').innerHTML = '<option value="">📥 Recibido por asignar</option>' + rs
+    .filter(r => r.active && !r.retired)
     .map(r => `
       <option value="${r.id}">
         ${esc(r.name)}
@@ -106,7 +113,7 @@ function render() {
     set('rider', current);
   }
 
-  $('orders').innerHTML = os.map(o => `
+  const renderOrder = o => `
     <div class="item">
       <div class="row">
         <h3>${esc(o.code)} · ${esc(o.local)}</h3>
@@ -116,12 +123,16 @@ function render() {
       <p>
         <b>Motorizado:</b> ${esc(o.riderName)}
         · <b>Entrega:</b> ${esc(o.address)}
+        · <b>Zona:</b> ${esc(o.zoneName || 'Sin zona')}
       </p>
 
       <p>${esc(o.products)}</p>
 
       ${total(o)}
       ${eta(o)}
+      <p><b>Delivery real (interno):</b> ${o.realDeliveryAmount == null ? 'Sin definir' : money(o.realDeliveryAmount)}</p>
+      <div class="row"><label>Delivery real S/<input type="number" min="0" step="0.01" data-real-input="${o.id}" value="${o.realDeliveryAmount ?? ''}"></label><button class="secondary" data-real-save="${o.id}">Guardar delivery real</button></div>
+      ${!o.cancelled && o.stage===0 ? `<div class="row"><label>Asignar motorizado<select data-assign-rider="${o.id}"><option value="">Seleccionar</option>${rs.filter(r=>r.active&&!r.retired).map(r=>`<option value="${r.id}">${esc(r.name)}${os.some(x=>x.riderId===r.id&&x.stage>=1&&x.stage<5&&!x.cancelled&&!x.rejected&&x.zoneId&&x.zoneId===o.zoneId)?' · 🛵 MISMA ZONA EN RUTA':''}</option>`).join('')}</select></label><button data-assign="${o.id}">Designar</button>${o.riderId?`<button class="secondary" data-unassign="${o.id}">Devolver a recibidos</button>`:''}</div>` : ''}
 
       <div class="row">
         <label>
@@ -180,7 +191,7 @@ function render() {
         ${
           o.stage === 0 && !o.rejected && !o.cancelled
             ? `<button data-sent="${o.id}">
-                 Confirmar WhatsApp enviado (inicia 2 min)
+                 Confirmar WhatsApp enviado
                </button>`
             : ''
         }
@@ -194,19 +205,18 @@ function render() {
         </button>
       </p>
 
-      <p class="muted">
-        ${
-          o.deadline &&
-          o.stage === 0 &&
-          !o.rejected &&
-          !o.cancelled
-            ? 'Respuesta antes de: ' +
-              new Date(o.deadline).toLocaleTimeString('es-PE')
-            : ''
-        }
-      </p>
     </div>
-  `).join('') || '<p>Aún no hay pedidos.</p>';
+  `;
+  const groups = [
+    ['📥 Pedidos recibidos por asignar', o => !o.riderId && !o.cancelled && o.stage===0],
+    ['📋 Pedidos designados', o => o.riderId && o.stage === 0 && !o.cancelled && !o.rejected],
+    ['🏍️ Pedidos aceptados', o => o.stage >= 1 && o.stage < 5 && !o.cancelled && !o.rejected],
+    ['✅ Pedidos entregados', o => o.stage === 5 && !o.cancelled]
+  ];
+  $('orders').innerHTML = groups.map(([name, filter]) => {
+    const list = os.filter(filter);
+    return `<section class="order-group"><h3>${name} (${list.length})</h3>${list.map(renderOrder).join('') || '<p class="muted">Sin pedidos en esta sección.</p>'}</section>`;
+  }).join('') + (os.some(o => o.cancelled || o.rejected) ? `<details><summary>Historial de rechazados y cancelados (${os.filter(o => o.cancelled || o.rejected).length})</summary>${os.filter(o => o.cancelled || o.rejected).map(renderOrder).join('')}</details>` : '');
 }
 
 async function run(action, body) {
@@ -345,6 +355,7 @@ $('riders').onclick = event => {
     );
   }
 
+  if (target.dataset.retire) { const r=data.riders.find(x=>x.id===target.dataset.retire); if(r&&confirm(r.retired?'¿Restaurar registro?':'¿Retirar motorizado del listado sin borrar su historial?')) run(r.retired?'restore_rider':'retire_rider',{id:r.id}); }
   if (target.dataset.toggle) {
     run('toggle_rider', {
       id: target.dataset.toggle
@@ -352,6 +363,8 @@ $('riders').onclick = event => {
   }
 };
 
+$('addZone').onclick=async()=>{const name=get('zoneName');if(!name)return alert('Escribe la zona');await run('zone_add',{name});set('zoneName','');};
+$('zones').onclick=e=>{const b=e.target.closest('button');if(!b)return;const id=b.dataset.zoneToggle||b.dataset.zoneEdit;const z=(data.zones||[]).find(x=>x.id===id);if(!z)return;if(b.dataset.zoneEdit){const name=prompt('Nuevo nombre de la zona:',z.name);if(name&&name.trim())run('zone_update',{id,name:name.trim()});}else if(b.dataset.zoneToggle)run('zone_update',{id,active:!z.active});};
 // ==========================================
 // EXTRAER DATOS DE WHATSAPP
 // ==========================================
@@ -407,10 +420,21 @@ $('create').onclick = async () => {
     const body = {};
 
     for (const key of values) {
-      body[key] = get(key);
+      body[key] = key==='zoneId' ? get('zone') : get(key);
     }
 
     await call('create', body);
+
+    for (const key of values) {
+      const el=$(key);if(el) set(key, '');
+    }
+    set('zone','');
+    set('rider','');
+    set('assignment','turno');
+    set('productAmount', '0');
+    set('deliveryAmount', '0');
+    recalc();
+    $('local').focus();
 
     $('formError').textContent =
       'Pedido registrado correctamente.';
@@ -437,6 +461,9 @@ $('orders').onclick = event => {
   const target = event.target;
 
   const id =
+    target.dataset.assign ||
+    target.dataset.unassign ||
+    target.dataset.realSave ||
     target.dataset.prices ||
     target.dataset.saveeta ||
     target.dataset.copyr ||
@@ -452,7 +479,18 @@ $('orders').onclick = event => {
 
   const item = target.closest('.item');
 
-  if (target.dataset.prices) {
+  if(target.dataset.assign){
+    const riderId=item.querySelector('[data-assign-rider]').value;
+    if(!riderId)return alert('Selecciona un motorizado');
+    const r=data.riders.find(x=>x.id===riderId);
+    const active=data.orders.filter(x=>x.riderId===riderId&&x.stage>=1&&x.stage<5&&!x.cancelled&&!x.rejected);
+    const assignment=active.length?'manual':'turno';
+    const reason=active.length?'Pedido adicional en ruta por zona: '+(order.zoneName||'sin zona'):'';
+    if(active.length&&!confirm('Motorizado '+r.name+' tiene '+active.length+' pedido(s) activo(s). ¿Asignar adicional en ruta?'))return;
+    run('assign_order',{id,riderId,assignment,reason});
+  } else if(target.dataset.unassign){if(confirm('¿Devolver pedido a recibidos por asignar?'))run('unassign_order',{id});
+  } else if(target.dataset.realSave){run('real_delivery',{id,amount:item.querySelector('[data-real-input]').value});
+  } else if (target.dataset.prices) {
     run('prices', {
       id,
       productAmount:
@@ -481,7 +519,7 @@ $('orders').onclick = event => {
   } else if (target.dataset.sent) {
     if (
       confirm(
-        '¿Ya enviaste el enlace por WhatsApp al motorizado? Se iniciarán los 2 minutos.'
+        '¿Confirmas que enviaste el enlace al motorizado? No existe límite automático de respuesta.'
       )
     ) {
       run('mark_sent', { id });
