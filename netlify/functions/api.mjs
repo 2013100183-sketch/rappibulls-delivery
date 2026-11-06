@@ -79,7 +79,9 @@ const publicOrder = o => ({
   rejected: o.rejected,
   cancelled: o.cancelled,
   updated: o.updated_at,
-  riderName: o.riders?.name || ''
+  riderName: o.riders?.name || '',
+  zoneId: o.zone_id || null,
+  zoneName: o.delivery_zones?.name || ''
 });
 
 async function operator(db, headers) {
@@ -150,7 +152,7 @@ async function loadOrder(db, id) {
   const rows = checked(
     await db
       .from('orders')
-      .select('*,riders(name,token)')
+      .select('*,riders(name,token),delivery_zones(name)')
       .eq('id', id)
       .limit(1)
   );
@@ -162,48 +164,26 @@ async function loadOrder(db, id) {
   return rows[0];
 }
 
-async function timeout(db) {
-  const now = new Date().toISOString();
-
-  const expired = checked(
-    await db
-      .from('orders')
-      .select('*')
-      .eq('stage', 0)
-      .eq('cancelled', false)
-      .eq('rejected', false)
-      .not('response_deadline', 'is', null)
-      .lte('response_deadline', now)
-  );
-
-  for (const o of expired) {
-    const updated = checked(
-      await db
-        .from('orders')
-        .update({
-          rejected: true,
-          updated_at: now,
-          response_deadline: null
-        })
-        .eq('id', o.id)
-        .eq('stage', 0)
-        .eq('rejected', false)
-        .select('id')
-    );
-
-    if (updated.length) {
-      if (o.assignment === 'turno') {
-        await rotate(db, o.rider_id);
-      }
-
-      await history(
-        db,
-        o.id,
-        'No respondió en 2 minutos'
-      );
-    }
+async function verifyZone(db,id) {
+  if (!isUuid(id)) throw Error('Zona inválida');
+  const rows=checked(await db.from('delivery_zones').select('id').eq('id',id).eq('active',true).limit(1));
+  if (!rows.length) throw Error('Zona desactivada o inexistente');
+}
+async function verifyRiderAssignment(db,id,assignment,excludeId='') {
+  if (!isUuid(id)) throw Error('Selecciona un motorizado válido');
+  const rr=checked(await db.from('riders').select('id').eq('id',id).eq('active',true).eq('retired',false).limit(1));
+  if (!rr.length) throw Error('Motorizado fuera de turno o inactivo');
+  let q=db.from('orders').select('id').eq('rider_id',id).eq('stage',0).eq('cancelled',false).eq('rejected',false);
+  if (excludeId) q=q.neq('id',excludeId);
+  if (checked(await q.limit(1)).length) throw Error('Motorizado tiene solicitud pendiente de respuesta');
+  if (assignment==='turno') {
+    let b=db.from('orders').select('id').eq('rider_id',id).gte('stage',1).lt('stage',5).eq('cancelled',false).eq('rejected',false);
+    if (excludeId) b=b.neq('id',excludeId);
+    if (checked(await b.limit(1)).length) throw Error('Motorizado ocupado: usa asignación manual por ruta');
   }
 }
+// Sin vencimiento automático: la operadora decide cuándo reasignar.
+async function timeout(db) { return; }
 
 export async function handler(event) {
   try {
@@ -242,12 +222,12 @@ export async function handler(event) {
       const rr = checked(
         await db
           .from('riders')
-          .select('id,name,active')
+          .select('id,name,active,retired')
           .eq('token', t)
           .limit(1)
       );
 
-      if (!rr.length) {
+      if (!rr.length || rr[0].retired) {
         return json(404, {
           error: 'Motorizado no encontrado'
         });
@@ -258,21 +238,22 @@ export async function handler(event) {
       const os = checked(
         await db
           .from('orders')
-          .select('*')
+          .select('*,delivery_zones(name)')
           .eq('rider_id', rr[0].id)
           .order('created_at', { ascending: false })
           .limit(80)
       );
 
       return json(200, {
-        rider: rr[0],
+        rider: {name:rr[0].name,active:rr[0].active},
         orders: os.map(o => ({
           ...publicOrder(o),
           phone: o.phone,
           instructions: o.instructions,
           map: o.map_url,
           payment: o.payment,
-          clientToken: o.client_token
+          clientToken: o.client_token,
+          realDeliveryAmount: o.real_delivery_cents == null ? null : o.real_delivery_cents / 100
         }))
       });
     }
@@ -290,7 +271,7 @@ export async function handler(event) {
       const os = checked(
         await db
           .from('orders')
-          .select('*,riders(name)')
+          .select('*,riders(name),delivery_zones(name)')
           .eq('client_token', t)
           .limit(1)
       );
@@ -321,12 +302,12 @@ export async function handler(event) {
       const rr = checked(
         await db
           .from('riders')
-          .select('id')
+          .select('id,retired')
           .eq('token', t)
           .limit(1)
       );
 
-      if (!rr.length) {
+      if (!rr.length || rr[0].retired) {
         return json(403, {
           error: 'Acceso denegado'
         });
@@ -345,6 +326,13 @@ export async function handler(event) {
 
       const now = new Date().toISOString();
 
+      if (choice === 'real_delivery') {
+        const amount = cents(body.amount);
+        if (amount === null) throw Error('Delivery real inválido');
+        checked(await db.from('orders').update({real_delivery_cents:amount,updated_at:now}).eq('id',id));
+        await history(db,id,'Delivery real actualizado por motorizado');
+        return json(200,{ok:true});
+      }
       if (choice === 'reject') {
         if (o.stage !== 0) {
           throw Error(
@@ -357,6 +345,7 @@ export async function handler(event) {
             .from('orders')
             .update({
               rejected: true,
+              rider_id: null,
               updated_at: now,
               response_deadline: null
             })
@@ -370,9 +359,7 @@ export async function handler(event) {
           throw Error('Pedido ya respondido');
         }
 
-        if (o.assignment === 'turno') {
-          await rotate(db, o.rider_id);
-        }
+        await rotate(db, o.rider_id);
 
         await history(db, id, 'Pedido rechazado');
 
@@ -389,16 +376,8 @@ export async function handler(event) {
           );
         }
 
-        if (
-          o.stage === 0 &&
-          o.response_deadline &&
-          new Date(o.response_deadline).getTime() < Date.now()
-        ) {
-          throw Error(
-            'Plazo de aceptación vencido'
-          );
-        }
 
+        if (next === 5 && o.real_delivery_cents == null) throw Error('Define el delivery real antes de finalizar');
         const rows = checked(
           await db
             .from('orders')
@@ -420,10 +399,7 @@ export async function handler(event) {
           );
         }
 
-        if (
-          next === 1 &&
-          o.assignment === 'turno'
-        ) {
+        if (next === 1) {
           await rotate(db, o.rider_id);
         }
 
@@ -450,16 +426,19 @@ export async function handler(event) {
       const os = checked(
         await db
           .from('orders')
-          .select('*,riders(name,token)')
+          .select('*,riders(name,token),delivery_zones(name)')
           .order('created_at', { ascending: false })
           .limit(300)
       );
 
+      const zones = checked(await db.from('delivery_zones').select('id,name,active').order('name'));
       return json(200, {
+        zones,
         riders: rs.map(r => ({
           id: r.id,
           name: r.name,
           active: r.active,
+          retired: !!r.retired,
           token: r.token,
           busy: os.some(
             o =>
@@ -490,11 +469,46 @@ export async function handler(event) {
           riderToken: o.riders?.token,
           clientToken: o.client_token,
           sentAt: o.sent_at,
-          deadline: o.response_deadline
+          deadline: o.response_deadline,
+          realDeliveryAmount: o.real_delivery_cents == null ? null : o.real_delivery_cents / 100
         }))
       });
     }
 
+    // GESTIÓN DE ZONAS (solo operadora)
+    if (action === 'zone_add') {
+      const name = required(body.name, 100);
+      if (name.length < 2) throw Error('Nombre de zona demasiado corto');
+      const existing = checked(await db.from('delivery_zones').select('id').ilike('name', name).limit(1));
+      if (existing.length) throw Error('La zona ya existe');
+      checked(await db.from('delivery_zones').insert({name,active:true}));
+      return json(200,{ok:true});
+    }
+    if (action === 'zone_update') {
+      if (!isUuid(body.id)) throw Error('Zona inválida');
+      const patch = {};
+      if (body.name !== undefined) {
+        const name = required(body.name,100);
+        if (name.length < 2) throw Error('Nombre demasiado corto');
+        patch.name = name;
+      }
+      if (typeof body.active === 'boolean') patch.active = body.active;
+      if (!Object.keys(patch).length) throw Error('Sin cambios');
+      checked(await db.from('delivery_zones').update(patch).eq('id',body.id));
+      return json(200,{ok:true});
+    }
+    if (action === 'retire_rider') {
+      if (!isUuid(body.id)) throw Error('Motorizado inválido');
+      const pending = checked(await db.from('orders').select('id').eq('rider_id',body.id).eq('cancelled',false).eq('rejected',false).lt('stage',5).limit(1));
+      if (pending.length) throw Error('El motorizado tiene pedidos activos. Reasigna o termina primero.');
+      checked(await db.from('riders').update({retired:true,active:false}).eq('id',body.id));
+      return json(200,{ok:true});
+    }
+    if (action === 'restore_rider') {
+      if (!isUuid(body.id)) throw Error('Motorizado inválido');
+      checked(await db.from('riders').update({retired:false,active:false}).eq('id',body.id));
+      return json(200,{ok:true});
+    }
     // REGISTRAR MOTORIZADO
     if (action === 'add_rider') {
       const name = required(body.name, 100);
@@ -514,6 +528,8 @@ export async function handler(event) {
       checked(
         await db.from('riders').insert({
           name,
+          active:false,
+          retired:false,
           token: token(),
           queue_position:
             (max[0]?.queue_position || 0) + 1
@@ -528,11 +544,17 @@ export async function handler(event) {
       const r = checked(
         await db
           .from('riders')
-          .select('active')
+          .select('active,retired')
           .eq('id', body.id)
           .single()
       );
 
+      if (r.retired) throw Error('Reactiva el registro del motorizado primero');
+      if (r.active) {
+        const pending = checked(await db.from('orders').select('id').eq('rider_id', body.id).eq('cancelled', false).eq('rejected', false).lt('stage', 5).limit(1));
+        if (pending.length) throw Error('No puedes sacar de turno a un motorizado con pedidos activos. Resuelve o reasigna sus pedidos primero.');
+      }
+      if (!r.active) await rotate(db, body.id);
       checked(
         await db
           .from('riders')
@@ -570,14 +592,10 @@ export async function handler(event) {
         );
       }
 
-      if (!isUuid(riderId)) {
-        throw Error(
-          'Selecciona un motorizado válido antes de crear el pedido.'
-        );
-      }
+      if (riderId && !isUuid(riderId)) throw Error('Motorizado inválido');
 
       if (
-        assignment === 'manual' &&
+        riderId && assignment === 'manual' &&
         !reason
       ) {
         throw Error(
@@ -585,60 +603,9 @@ export async function handler(event) {
         );
       }
 
-      const riders = checked(
-        await db
-          .from('riders')
-          .select('*')
-          .eq('id', riderId)
-          .eq('active', true)
-          .limit(1)
-      );
-
-      const r = riders[0];
-
-      if (!r) {
-        throw Error(
-          'Motorizado no disponible'
-        );
-      }
-
-      const pending = checked(
-        await db
-          .from('orders')
-          .select('id')
-          .eq('rider_id', riderId)
-          .eq('stage', 0)
-          .eq('cancelled', false)
-          .eq('rejected', false)
-          .limit(1)
-      );
-
-      if (pending.length) {
-        throw Error(
-          'El motorizado ya tiene una solicitud pendiente de respuesta'
-        );
-      }
-
-      if (assignment === 'turno') {
-        const busy = checked(
-          await db
-            .from('orders')
-            .select('id')
-            .eq('rider_id', riderId)
-            .gte('stage', 1)
-            .lt('stage', 5)
-            .eq('cancelled', false)
-            .eq('rejected', false)
-            .limit(1)
-        );
-
-        if (busy.length) {
-          throw Error(
-            'Motorizado ocupado: usa asignación manual justificada'
-          );
-        }
-      }
-
+      if (riderId) await verifyRiderAssignment(db,riderId,assignment);
+      const zoneId = required(body.zoneId,80);
+      if (zoneId) await verifyZone(db,zoneId);
       const p = cents(body.productAmount);
       const d = cents(body.deliveryAmount);
 
@@ -646,6 +613,7 @@ export async function handler(event) {
         throw Error('Importes inválidos');
       }
 
+      if (body.realDeliveryAmount !== '' && body.realDeliveryAmount != null && cents(body.realDeliveryAmount) === null) throw Error('Delivery real inválido');
       const eta =
         body.etaMinutes === '' ||
         body.etaMinutes == null
@@ -678,7 +646,9 @@ export async function handler(event) {
             local_name: local,
             products,
             address,
-            rider_id: riderId,
+            rider_id: riderId || null,
+            zone_id: zoneId || null,
+            real_delivery_cents: body.realDeliveryAmount === '' || body.realDeliveryAmount == null ? null : cents(body.realDeliveryAmount),
             client_token: token(),
             assignment,
             reason,
@@ -709,16 +679,45 @@ export async function handler(event) {
           .single()
       );
 
-      await history(db, o.id, 'Pedido creado');
+      await history(db, o.id, riderId ? 'Pedido creado y designado' : 'Pedido recibido por asignar');
 
       return json(200, { ok: true });
     }
 
+    // DESIGNAR O REASIGNAR PEDIDO (solo operadora)
+    if (action === 'assign_order') {
+      const o = await loadOrder(db,body.id);
+      if (o.cancelled || o.stage === 5 || (o.stage > 0 && !o.rejected)) throw Error('Pedido ya aceptado o cerrado');
+      const riderId = required(body.riderId,80);
+      const assignment = body.assignment === 'manual' ? 'manual' : 'turno';
+      if (assignment === 'manual' && !required(body.reason,500)) throw Error('Indica justificación manual');
+      await verifyRiderAssignment(db,riderId,assignment,o.id);
+      checked(await db.from('orders').update({rider_id:riderId,assignment,reason:required(body.reason,500),rejected:false,stage:0,sent_at:null,response_deadline:null,updated_at:new Date().toISOString()}).eq('id',o.id));
+      await history(db,o.id,'Designado / reasignado por operadora');
+      return json(200,{ok:true});
+    }
+    if (action === 'unassign_order') {
+      const o = await loadOrder(db,body.id);
+      if (o.cancelled || o.stage !== 0) throw Error('Solo pedidos pendientes de aceptación');
+      checked(await db.from('orders').update({rider_id:null,rejected:false,sent_at:null,response_deadline:null,updated_at:new Date().toISOString()}).eq('id',o.id));
+      await history(db,o.id,'Devuelto a recibidos por asignar');
+      return json(200,{ok:true});
+    }
+    if (action === 'real_delivery') {
+      const o = await loadOrder(db,body.id);
+      if (o.cancelled) throw Error('Pedido cancelado');
+      const v = body.amount === '' || body.amount == null ? null : cents(body.amount);
+      if (v === null && body.amount !== '' && body.amount != null) throw Error('Importe inválido');
+      checked(await db.from('orders').update({real_delivery_cents:v,updated_at:new Date().toISOString()}).eq('id',o.id));
+      await history(db,o.id,'Delivery real actualizado por operadora');
+      return json(200,{ok:true});
+    }
     // CONFIRMAR ENVÍO DE WHATSAPP
     if (action === 'mark_sent') {
       const o = await loadOrder(db, body.id);
 
       if (
+        !o.rider_id ||
         o.stage !== 0 ||
         o.rejected ||
         o.cancelled
@@ -733,10 +732,7 @@ export async function handler(event) {
           .from('orders')
           .update({
             sent_at: now.toISOString(),
-            response_deadline:
-              new Date(
-                now.getTime() + 120000
-              ).toISOString(),
+            response_deadline: null,
             updated_at: now.toISOString()
           })
           .eq('id', o.id)
@@ -745,7 +741,7 @@ export async function handler(event) {
       await history(
         db,
         o.id,
-        'Operadora confirmó envío de WhatsApp; plazo 2 minutos'
+        'Operadora confirmó envío de WhatsApp (sin plazo automático)'
       );
 
       return json(200, { ok: true });
