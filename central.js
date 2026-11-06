@@ -42,10 +42,13 @@ async function load() {
   if (!access || busy) return;
 
   const focused = document.activeElement;
+
   if (
     ['INPUT', 'TEXTAREA', 'SELECT'].includes(focused?.tagName) &&
     focused.closest('#orders')
-  ) return;
+  ) {
+    return;
+  }
 
   busy = true;
 
@@ -76,9 +79,11 @@ function render() {
               : '🟢 Disponible'
           : '⚪ Pausado'
       }
+
       <button class="secondary" data-toggle="${r.id}">
         ${r.active ? 'Pausar' : 'Activar'}
       </button>
+
       <button class="secondary" data-rider-link="${r.token}">
         Copiar enlace único
       </button>
@@ -121,14 +126,24 @@ function render() {
       <div class="row">
         <label>
           Productos S/
-          <input data-p="${o.id}" type="number"
-            min="0" step="0.01" value="${o.productAmount}">
+          <input
+            data-p="${o.id}"
+            type="number"
+            min="0"
+            step="0.01"
+            value="${o.productAmount}"
+          >
         </label>
 
         <label>
           Delivery S/
-          <input data-d="${o.id}" type="number"
-            min="0" step="0.01" value="${o.deliveryAmount}">
+          <input
+            data-d="${o.id}"
+            type="number"
+            min="0"
+            step="0.01"
+            value="${o.deliveryAmount}"
+          >
         </label>
 
         <button class="secondary" data-prices="${o.id}">
@@ -139,8 +154,13 @@ function render() {
       <div class="row">
         <label>
           ETA minutos
-          <input data-eta="${o.id}" type="number"
-            min="1" max="360" value="${o.etaMinutes ?? ''}">
+          <input
+            data-eta="${o.id}"
+            type="number"
+            min="1"
+            max="360"
+            value="${o.etaMinutes ?? ''}"
+          >
         </label>
 
         <button class="secondary" data-saveeta="${o.id}">
@@ -165,16 +185,21 @@ function render() {
             : ''
         }
 
-        <button class="danger" data-cancel="${o.id}"
-          ${o.cancelled || o.stage === 5 ? 'disabled' : ''}>
+        <button
+          class="danger"
+          data-cancel="${o.id}"
+          ${o.cancelled || o.stage === 5 ? 'disabled' : ''}
+        >
           Cancelar
         </button>
       </p>
 
       <p class="muted">
         ${
-          o.deadline && o.stage === 0 &&
-          !o.rejected && !o.cancelled
+          o.deadline &&
+          o.stage === 0 &&
+          !o.rejected &&
+          !o.cancelled
             ? 'Respuesta antes de: ' +
               new Date(o.deadline).toLocaleTimeString('es-PE')
             : ''
@@ -194,12 +219,15 @@ async function run(action, body) {
   }
 }
 
+// ==========================================
 // INICIO DE SESIÓN CORREGIDO
+// ==========================================
 
 $('enter').onclick = async () => {
   if (loggingIn) return;
 
   loggingIn = true;
+
   $('enter').disabled = true;
   $('enter').textContent = 'Ingresando...';
 
@@ -217,13 +245,16 @@ $('enter').onclick = async () => {
 
     if (!conf || !conf.url || !conf.anonKey) {
       throw Error(
-        'Netlify no está entregando SUPABASE_URL o SUPABASE_ANON_KEY. Revisa las variables de entorno y vuelve a desplegar.'
+        'Netlify no está entregando SUPABASE_URL o SUPABASE_ANON_KEY. Revisa las variables de entorno.'
       );
     }
 
-    // Crear solamente una instancia de Supabase.
+    // Evita crear varias conexiones de Supabase.
     if (!client) {
-      client = supabase.createClient(conf.url, conf.anonKey);
+      client = supabase.createClient(
+        conf.url,
+        conf.anonKey
+      );
     }
 
     const result = await client.auth.signInWithPassword({
@@ -246,18 +277,19 @@ $('enter').onclick = async () => {
 
     access = result.data.session.access_token;
 
-    // Comprobar que Netlify permita consultar los datos.
+    // Verificar acceso a los datos.
     try {
       data = await call('list');
     } catch (error) {
       throw Error(
-        'Supabase inició sesión correctamente, pero la central no pudo consultar los pedidos: ' +
+        'Supabase inició sesión, pero no se pudieron consultar los pedidos: ' +
         error.message
       );
     }
 
-    $('login').classList.add('hidden');
-    $('app').classList.remove('hidden');
+    // CORREGIDO: el CSS utiliza .hide
+    $('login').classList.add('hide');
+    $('app').classList.remove('hide');
 
     render();
 
@@ -274,7 +306,9 @@ $('enter').onclick = async () => {
   }
 };
 
+// ==========================================
 // CERRAR SESIÓN
+// ==========================================
 
 $('logout').onclick = async () => {
   try {
@@ -288,11 +322,13 @@ $('logout').onclick = async () => {
   access = '';
   data = { riders: [], orders: [] };
 
-  $('app').classList.add('hidden');
-  $('login').classList.remove('hidden');
+  $('app').classList.add('hide');
+  $('login').classList.remove('hide');
 };
 
+// ==========================================
 // MOTORIZADOS
+// ==========================================
 
 $('addRider').onclick = () => {
   run('add_rider', {
@@ -304,7 +340,9 @@ $('riders').onclick = event => {
   const target = event.target;
 
   if (target.dataset.riderLink) {
-    copy(link('motorizado.html', target.dataset.riderLink));
+    copy(
+      link('motorizado.html', target.dataset.riderLink)
+    );
   }
 
   if (target.dataset.toggle) {
@@ -314,14 +352,18 @@ $('riders').onclick = event => {
   }
 };
 
+// ==========================================
 // EXTRAER DATOS DE WHATSAPP
+// ==========================================
 
 $('extract').onclick = () => {
   try {
     const fields = parseV3(get('raw'));
 
     for (const key of Object.keys(fields)) {
-      if ($(key)) set(key, fields[key]);
+      if ($(key)) {
+        set(key, fields[key]);
+      }
     }
 
     recalc();
@@ -329,12 +371,15 @@ $('extract').onclick = () => {
     alert(
       'Datos extraídos. Revisa productos, dirección y referencias antes de guardar.'
     );
+
   } catch (error) {
     showError('formError', error);
   }
 };
 
+// ==========================================
 // CALCULAR TOTAL
+// ==========================================
 
 function recalc() {
   const products = Number(get('productAmount')) || 0;
@@ -344,11 +389,16 @@ function recalc() {
     'Total: ' + money(products + delivery);
 }
 
-for (const key of ['productAmount', 'deliveryAmount']) {
+for (const key of [
+  'productAmount',
+  'deliveryAmount'
+]) {
   $(key).oninput = recalc;
 }
 
+// ==========================================
 // REGISTRAR PEDIDO
+// ==========================================
 
 $('create').onclick = async () => {
   try {
@@ -373,11 +423,15 @@ $('create').onclick = async () => {
   }
 };
 
-// ACTUALIZAR MANUALMENTE
+// ==========================================
+// ACTUALIZAR PEDIDOS
+// ==========================================
 
 $('refresh').onclick = load;
 
+// ==========================================
 // ACCIONES DE PEDIDOS
+// ==========================================
 
 $('orders').onclick = event => {
   const target = event.target;
@@ -401,26 +455,35 @@ $('orders').onclick = event => {
   if (target.dataset.prices) {
     run('prices', {
       id,
-      productAmount: item.querySelector('[data-p]').value,
-      deliveryAmount: item.querySelector('[data-d]').value
+      productAmount:
+        item.querySelector('[data-p]').value,
+      deliveryAmount:
+        item.querySelector('[data-d]').value
     });
 
   } else if (target.dataset.saveeta) {
     run('eta', {
       id,
-      etaMinutes: item.querySelector('[data-eta]').value
+      etaMinutes:
+        item.querySelector('[data-eta]').value
     });
 
   } else if (target.dataset.copyr) {
-    copy(link('motorizado.html', order.riderToken));
+    copy(
+      link('motorizado.html', order.riderToken)
+    );
 
   } else if (target.dataset.copyc) {
-    copy(link('seguimiento.html', order.clientToken));
+    copy(
+      link('seguimiento.html', order.clientToken)
+    );
 
   } else if (target.dataset.sent) {
-    if (confirm(
-      '¿Ya enviaste el enlace por WhatsApp al motorizado? Se iniciarán los 2 minutos.'
-    )) {
+    if (
+      confirm(
+        '¿Ya enviaste el enlace por WhatsApp al motorizado? Se iniciarán los 2 minutos.'
+      )
+    ) {
       run('mark_sent', { id });
     }
 
@@ -431,18 +494,24 @@ $('orders').onclick = event => {
   }
 };
 
+// ==========================================
 // ACTUALIZACIÓN AUTOMÁTICA CADA 3 SEGUNDOS
+// ==========================================
 
 setInterval(async () => {
-  if (!client || !access || loggingIn) return;
+  if (!client || !access || loggingIn) {
+    return;
+  }
 
   try {
     const result = await client.auth.getSession();
 
     if (!result.data?.session?.access_token) {
       access = '';
-      $('app').classList.add('hidden');
-      $('login').classList.remove('hidden');
+
+      $('app').classList.add('hide');
+      $('login').classList.remove('hide');
+
       return;
     }
 
@@ -451,6 +520,9 @@ setInterval(async () => {
     await load();
 
   } catch (error) {
-    console.warn('Error de actualización:', error);
+    console.warn(
+      'Error de actualización:',
+      error
+    );
   }
 }, 3000);
